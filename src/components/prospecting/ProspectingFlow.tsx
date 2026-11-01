@@ -15,6 +15,10 @@ interface Props {
   getToken: () => Promise<string>;
   brand: { name: string; domain: string; logoDataUrl?: string };
   onOpenTab?: (tab: "outreach" | "enterprise") => void;
+  // Snapshot from the /api/app-shell mount request, when it resolved before
+  // this tab first opened. Avoids a duplicate /api/prospecting fetch on mount;
+  // "error" mirrors a failed load, null/undefined loads as usual.
+  seed?: { state: ProspectingState; capabilities: Capabilities } | "error" | null;
 }
 
 const card = "ui-card";
@@ -67,7 +71,7 @@ function Sources({ items }: { items: Evidence[] }) {
   );
 }
 
-export default function ProspectingFlow({ authedFetch, getToken, brand, onOpenTab }: Props) {
+export default function ProspectingFlow({ authedFetch, getToken, brand, onOpenTab, seed = null }: Props) {
   const [state, setState] = useState<ProspectingState | null>(null);
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [view, setView] = useState<StepId>("research");
@@ -90,9 +94,24 @@ export default function ProspectingFlow({ authedFetch, getToken, brand, onOpenTa
     }
   }, [authedFetch]);
 
+  // Consume the app-shell snapshot captured at mount, if one was provided;
+  // otherwise load directly. Later refreshes still go through load().
+  const mountSeed = useRef(seed);
   useEffect(() => {
-    load();
-  }, [load]);
+    const initial = mountSeed.current;
+    if (!initial) {
+      load();
+      return;
+    }
+    if (initial === "error") {
+      setLoadError("Prospecting could not be loaded.");
+      return;
+    }
+    setState(initial.state);
+    setCaps(initial.capabilities);
+    setView(firstOpenStep(initial.state));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     logRef.current?.lastElementChild?.scrollIntoView({ block: "nearest" });

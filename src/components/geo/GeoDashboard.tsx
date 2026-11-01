@@ -90,6 +90,11 @@ function MetricCard({ label, value, suffix, change }: { label: string; value: st
 }
 
 
+type ProspectingSeed = {
+  state: import("@/lib/prospecting/types").ProspectingState;
+  capabilities: { search: boolean; model: boolean; contactProvider: string | null };
+} | "error" | null;
+
 export default function GeoDashboard({ user, readOnly = false, initialState, demoRunDetails }: Props) {
   const [state, setState] = useState<WorkspaceState | null>(initialState ?? null);
   const [tab, setTab] = useState<Tab>(() => {
@@ -103,6 +108,7 @@ export default function GeoDashboard({ user, readOnly = false, initialState, dem
     return valid.includes(requested as Tab) && (!readOnly || requested !== "prospect") ? (requested as Tab) : fallback;
   });
   const [loading, setLoading] = useState(!initialState);
+  const [prospectingSeed, setProspectingSeed] = useState<ProspectingSeed>(null);
   const [scanning, setScanning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -189,13 +195,7 @@ export default function GeoDashboard({ user, readOnly = false, initialState, dem
   useEffect(() => {
     const stored = typeof window !== "undefined" ? window.localStorage.getItem("threadly-theme") : null;
     if (stored === "light" || stored === "dark") setTheme(stored);
-    authedFetch("/api/geo/ui-prefs")
-      .then((p) => {
-        const t = (p as { theme?: string }).theme;
-        if (t === "light" || t === "dark") setTheme(t);
-      })
-      .catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The account preference arrives with the /api/app-shell mount request below.
   }, []);
 
   useEffect(() => {
@@ -213,9 +213,43 @@ export default function GeoDashboard({ user, readOnly = false, initialState, dem
     });
   }, [authedFetch]);
 
+  // App shell: one mount request for workspace state, theme, key status and
+  // the prospecting snapshot (previously four separate mount fetches plus
+  // /api/access in PortalGate). Each section fails independently, mirroring the
+  // previous per-endpoint behavior; refresh() still reloads state on its own.
   useEffect(() => {
-    if (!readOnly) void refresh();
-  }, [refresh, readOnly]);
+    if (readOnly || !user) return;
+    let cancelled = false;
+    authedFetch("/api/app-shell")
+      .then((payload) => {
+        if (cancelled) return;
+        const sections = (payload as { sections?: Record<string, { error?: string } & Record<string, unknown>> }).sections ?? {};
+        const prefs = sections.uiPrefs;
+        if (prefs && (prefs.theme === "light" || prefs.theme === "dark")) setTheme(prefs.theme);
+        const next = sections.state;
+        if (next && !next.error) {
+          setState(next as unknown as WorkspaceState);
+          setError("");
+        } else {
+          setError(typeof next?.error === "string" ? next.error : "Could not load your workspace.");
+        }
+        const keys = sections.keys;
+        if (typeof keys?.keyEncryption === "boolean") setKeyEncryption(keys.keyEncryption);
+        const prospecting = sections.prospecting;
+        setProspectingSeed(prospecting && !prospecting.error ? (prospecting as unknown as ProspectingSeed) : "error");
+      })
+      .catch((caught) => {
+        if (cancelled) return;
+        setError(caught instanceof Error ? caught.message : "Could not load your workspace.");
+        setProspectingSeed("error");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authedFetch, readOnly, user]);
 
   useEffect(() => {
     try {
@@ -398,17 +432,7 @@ export default function GeoDashboard({ user, readOnly = false, initialState, dem
     return () => window.removeEventListener("threadly:open-settings", handler);
   }, [readOnly]);
 
-  useEffect(() => {
-    if (readOnly || !user) return;
-    authedFetch("/api/geo/keys")
-      .then((payload) => {
-        const data = payload as { keyEncryption?: boolean };
-        if (typeof data.keyEncryption === "boolean") setKeyEncryption(data.keyEncryption);
-      })
-      .catch(() => {
-        // keys status unavailable - panel keeps its default
-      });
-  }, [authedFetch, readOnly, user]);
+
 
   async function runScan() {
     setScanning(true);
@@ -923,6 +947,7 @@ export default function GeoDashboard({ user, readOnly = false, initialState, dem
           getToken={() => user.getIdToken()}
           brand={{ name: state.brand.name, domain: state.brand.domain, logoDataUrl: state.brand.logoDataUrl }}
           onOpenTab={(next) => setTab(next)}
+          seed={prospectingSeed}
         />
       )}
       {tab === "outreach" && !readOnly && (
